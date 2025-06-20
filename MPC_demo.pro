@@ -33,14 +33,14 @@ else:win32:CONFIG(debug, debug|release): LIBS += -L$$PWD/opencv/x64/vc16/lib/ -l
 INCLUDEPATH += $$PWD/opencv/include
 DEPENDPATH += $$PWD/opencv/include
 
-win32:CONFIG(release, debug|release): LIBS += -L$$PWD/qpOASES-releases-3.2.2/build/libs/Release/ -lqpOASES
-else:win32:CONFIG(debug, debug|release): LIBS += -L$$PWD/qpOASES-releases-3.2.2/build/libs/Debug/ -lqpOASES
+win32:CONFIG(release, debug|release): LIBS += -L$$PWD/qpOASES-releases-3.2.2/libs/Release/ -lqpOASES
+else:win32:CONFIG(debug, debug|release): LIBS += -L$$PWD/qpOASES-releases-3.2.2/libs/Debug/ -lqpOASES
 INCLUDEPATH += \
     $$PWD/qpOASES-releases-3.2.2/include \
-    $$PWD/qpOASES-releases-3.2.2/build/libs/Release \
-    $$PWD/qpOASES-releases-3.2.2/build/libs/Debug
+    $$PWD/qpOASES-releases-3.2.2/libs/Release \
+    $$PWD/qpOASES-releases-3.2.2/libs/Debug
 DEPENDPATH += \
     $$PWD/qpOASES-releases-3.2.2/include \
-    $$PWD/qpOASES-releases-3.2.2/build/libs/Release \
-    $$PWD/qpOASES-releases-3.2.2/build/libs/Debug
+    $$PWD/qpOASES-releases-3.2.2/libs/Release \
+    $$PWD/qpOASES-releases-3.2.2/libs/Debug
 
