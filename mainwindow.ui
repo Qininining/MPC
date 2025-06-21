@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1211</width>
-    <height>769</height>
+    <width>1589</width>
+    <height>1265</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -17,10 +17,40 @@
    <widget class="QChartView" name="charts" native="true">
     <property name="geometry">
      <rect>
-      <x>130</x>
-      <y>200</y>
-      <width>601</width>
-      <height>221</height>
+      <x>70</x>
+      <y>20</y>
+      <width>1391</width>
+      <height>411</height>
+     </rect>
+    </property>
+    <property name="font">
+     <font>
+      <family>Arial</family>
+     </font>
+    </property>
+   </widget>
+   <widget class="QChartView" name="charts_2" native="true">
+    <property name="geometry">
+     <rect>
+      <x>70</x>
+      <y>440</y>
+      <width>1391</width>
+      <height>411</height>
+     </rect>
+    </property>
+    <property name="font">
+     <font>
+      <family>Arial</family>
+     </font>
+    </property>
+   </widget>
+   <widget class="QChartView" name="charts_3" native="true">
+    <property name="geometry">
+     <rect>
+      <x>70</x>
+      <y>870</y>
+      <width>1391</width>
+      <height>411</height>
      </rect>
     </property>
     <property name="font">
@@ -35,7 +65,7 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>1211</width>
+     <width>1589</width>
      <height>21</height>
     </rect>
    </property>

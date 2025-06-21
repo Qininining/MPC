@@ -4,6 +4,7 @@
 #include <QMainWindow>
 #include <QLineSeries>
 #include <QChart>
+#include <QValueAxis>
 
 #include "MPC.h" // 包含 MPC 类头文件
 
@@ -30,5 +31,10 @@ private:
     QLineSeries *GreenSeries; // 用于绘制控制输入（可选）
 
     QChart *chart;
+    QChart *chart2; // 第二个图表
+    QChart *chart3; // 第三个图表（如果需要）
+
+
+    MPC* mpcController; // MPC 控制器实例
 };
 #endif // MAINWINDOW_H
