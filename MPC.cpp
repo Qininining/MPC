@@ -1,6 +1,90 @@
 #include "MPC.h"
 #include <iostream>
-#include <stdexcept> // Required for std::runtime_error and std::invalid_argument
+#include <stdexcept> // 必需，用于 std::runtime_error 和 std::invalid_argument
+#include <cmath>     // 必需，用于 std::fabs（Pade 近似）
+#include <limits>    // 必需，用于 std::numeric_limits
+
+
+// 辅助函数：使用 Pade 近似计算矩阵指数
+// 这是一个常用的数值方法，用于计算矩阵 M 的指数 exp(M)。
+// 更多详情请参考：
+// Charles Van Loan. "Nineteen Ways to Compute the Exponential of a Matrix, Twenty-Five Years Later." SIAM Review, 45(1):3–49, 2003.
+Eigen::MatrixXd matrix_exponential_pade(const Eigen::MatrixXd& M, int order) {
+    if (M.rows() != M.cols()) {
+        throw std::invalid_argument("matrix_exponential_pade: 输入矩阵必须是方阵。");
+    }
+    if (order < 0) {
+        throw std::invalid_argument("matrix_exponential_pade: Pade 近似阶数必须是非负数。");
+    }
+
+    int n = static_cast<int>(M.rows()); // 显式转换为 int
+    if (n == 0) {
+        return Eigen::MatrixXd::Identity(0, 0);
+    }
+
+    // 缩放：减小矩阵范数以提高 Pade 近似精度
+    double norm = M.norm();
+    int s = 0;
+    if (norm > 0.5) { // 如果范数很大，则缩小 M
+        s = static_cast<int>(std::floor(std::log2(norm / 0.5))) + 1;
+        // 限制 s 以防止过大的缩放因子
+        if (s > 10) s = 10; // 避免对于非常大的矩阵或过多平方操作可能导致的溢出
+    }
+    Eigen::MatrixXd A = M / static_cast<double>(1 << s); // A = M / 2^s
+
+    // 计算 A 的幂次，直到 6 阶，用于 (6,6) Pade 近似
+    Eigen::MatrixXd A_sq = A * A;
+    Eigen::MatrixXd A_cub = A_sq * A;
+    Eigen::MatrixXd A_4 = A_sq * A_sq; // A^4 = (A^2)^2
+    Eigen::MatrixXd A_5 = A_4 * A;
+    Eigen::MatrixXd A_6 = A_5 * A;
+
+    // (6,6) Pade 近似的系数：R_6(X) = N_6(X) / D_6(X)
+    // N_6(X) = I + (1/2)X + (1/8)X^2 + (1/48)X^3 + (1/384)X^4 + (1/3840)X^5 + (1/46080)X^6
+    // D_6(X) = I - (1/2)X + (1/8)X^2 - (1/48)X^3 + (1/384)X^4 - (1/3840)X^5 + (1/46080)X^6
+    // 这些系数是从 exp(x) 的泰勒级数展开导出的。
+    // 注意：对于一般的 (p,q) Pade 近似，系数更复杂，但对于 exp(X) 的 (k,k) 阶近似，
+    // 它们通常简化为这些对称形式。
+
+    double c0 = 1.0;
+    double c1 = 1.0 / 2.0;
+    double c2 = 1.0 / 8.0;
+    double c3 = 1.0 / 48.0;
+    double c4 = 1.0 / 384.0;
+    double c5 = 1.0 / 3840.0;
+    double c6 = 1.0 / 46080.0;
+
+    Eigen::MatrixXd N_Pade = c0 * Eigen::MatrixXd::Identity(n, n)
+                             + c1 * A
+                             + c2 * A_sq
+                             + c3 * A_cub
+                             + c4 * A_4
+                             + c5 * A_5
+                             + c6 * A_6;
+
+    Eigen::MatrixXd D_Pade = c0 * Eigen::MatrixXd::Identity(n, n)
+                             - c1 * A
+                             + c2 * A_sq
+                             - c3 * A_cub
+                             + c4 * A_4
+                             - c5 * A_5
+                             + c6 * A_6;
+
+    Eigen::MatrixXd exp_M_scaled;
+    // 使用小 epsilon 值比较行列式，检查逆矩阵的数值稳定性。
+    if (std::fabs(D_Pade.determinant()) < std::numeric_limits<double>::epsilon()) {
+        throw std::runtime_error("matrix_exponential_pade: 分母矩阵奇异（或接近奇异），无法计算逆。");
+    }
+    exp_M_scaled = D_Pade.inverse() * N_Pade;
+
+    // 反缩放：将结果平方 's' 次
+    Eigen::MatrixXd result = exp_M_scaled;
+    for (int i = 0; i < s; ++i) {
+        result = result * result;
+    }
+    return result;
+}
+
 
 // MPC 控制器的构造函数
 MPC::MPC(int N,
@@ -10,66 +94,141 @@ MPC::MPC(int N,
          const Eigen::MatrixXd& Q,
          const Eigen::MatrixXd& R,
          double dt)
-    : N_(N), C_(C), Q_(Q), R_(R), dt_(dt)
+    // 调整初始化列表顺序以匹配成员变量在类中的声明顺序，消除警告 C26432
+    : N_(N), dt_(dt), C_(C), Q_(Q), R_(R)
 {
-    // 获取矩阵维度
-    nx_ = Ac.rows();
-    nu_ = Bc.cols();
-    ny_ = C.rows();
+    // 获取矩阵维度并进行显式类型转换，消除警告 C4244
+    nx_ = static_cast<int>(Ac.rows()); // rows 是行数
+    nu_ = static_cast<int>(Bc.cols()); // cols 是列数
+    ny_ = static_cast<int>(C.rows());
 
     try {
         // 验证输入矩阵的维度是否一致
         if (Ac.cols() != nx_ || Bc.rows() != nx_ || C.cols() != nx_ ||
             Q.rows() != ny_ || Q.cols() != ny_ || R.rows() != nu_ || R.cols() != nu_) {
-            throw std::invalid_argument("Input matrix dimensions are inconsistent.");
+            throw std::invalid_argument("输入矩阵维度不一致。");
         }
         // 验证预测时域 N 和采样时间 dt
-        if (N_ <= 0 || dt_ <= 0) {
-            throw std::invalid_argument("Prediction horizon N and sampling time dt must be positive.");
+        if (N_ <= 0 || dt_ <= std::numeric_limits<double>::epsilon()) { // 检查是否大于一个小的 epsilon
+            throw std::invalid_argument("预测时域 N 必须为正，采样时间 dt 必须为正。");
         }
 
         // 离散化连续时间模型
         discretize_model(Ac, Bc, dt_, Ad_, Bd_);
 
+        // 预计算 MPC 的核心矩阵 (Psi, Gamma, Q_bar, R_bar, H_qp)
+        precompute_mpc_matrices();
+
         // 打印初始化信息
-        std::cout << "MPCController initialized:\n";
-        std::cout << "  Prediction Horizon (N): " << N_ << "\n";
-        std::cout << "  Sampling Time (dt): " << dt_ << "\n";
-        std::cout << "  State Dim (nx): " << nx_ << "\n";
-        std::cout << "  Input Dim (nu): " << nu_ << "\n";
-        std::cout << "  Output Dim (ny): " << ny_ << "\n";
+        std::cout << "MPC控制器已初始化:\n";
+        std::cout << "  预测时域 (N): " << N_ << "\n";
+        std::cout << "  采样时间 (dt): " << dt_ << "\n";
+        std::cout << "  状态维度 (nx): " << nx_ << "\n";
+        std::cout << "  输入维度 (nu): " << nu_ << "\n";
+        std::cout << "  输出维度 (ny): " << ny_ << "\n";
         std::cout << "  Ad:\n" << Ad_ << "\n";
         std::cout << "  Bd:\n" << Bd_ << "\n";
         std::cout << "  C:\n" << C_ << "\n";
         std::cout << "  Q:\n" << Q_ << "\n";
         std::cout << "  R:\n" << R_ << "\n";
+        std::cout << "  预计算的 Psi:\n" << Psi_ << "\n";
+        std::cout << "  预计算的 Gamma:\n" << Gamma_ << "\n";
+        std::cout << "  预计算的 H_qp:\n" << H_qp_ << "\n";
+
+
     } catch (const std::exception& e) {
-        std::cerr << "[MPC::MPC] Initialization Error: " << e.what() << std::endl;
-        // 在实际应用中，这里可能需要清理资源或设置错误标志
+        std::cerr << "[MPC::MPC] 初始化错误: " << e.what() << std::endl;
         throw; // 重新抛出异常，指示构造失败
     }
 }
 
 // 将连续时间模型离散化 (零阶保持 ZOH)
+// M = [Ac_cont, Bc_cont; 0, 0]
+// exp(M * dt) = [Ad_disc, Bd_disc; 0, I]
 void MPC::discretize_model(const Eigen::MatrixXd& Ac_cont,
                            const Eigen::MatrixXd& Bc_cont,
                            double dt,
                            Eigen::MatrixXd& Ad_disc,
                            Eigen::MatrixXd& Bd_disc)
 {
-    // 对于 ZOH 离散化，通常涉及矩阵指数 exp(Ac*dt) 和积分。
-    // 这里使用一个简单的近似：Ad = I + Ac*dt, Bd = Bc*dt
-    // 这种近似在采样时间 dt 很小的情况下是合理的。
-    // 更精确的 ZOH 离散化需要计算矩阵指数的积分，例如通过以下矩阵的指数：
-    // M = [Ac_cont, Bc_cont; 0, 0]
-    // exp(M * dt) = [Ad_disc, Bd_disc; 0, I]
-    // Eigen 库本身不直接提供 exp(MatrixXd) 的功能。如果需要精确的 ZOH 离散化，
-    // 可以考虑使用外部库，或者实现数值近似方法（如pade近似、泰勒级数展开等）。
-    // 此处仍保留简单近似以维持代码自包含性。
+    // 验证维度
+    if (Ac_cont.rows() != nx_ || Ac_cont.cols() != nx_ ||
+        Bc_cont.rows() != nx_ || Bc_cont.cols() != nu_) {
+        throw std::invalid_argument("discretize_model: 输入连续时间矩阵的维度与内部模型维度不匹配。");
+    }
 
-    Ad_disc = Eigen::MatrixXd::Identity(nx_, nx_) + Ac_cont * dt;
-    Bd_disc = Bc_cont * dt;
+    // 构建增广矩阵 M
+    // M = [Ac_cont, Bc_cont;
+    //      0_nu_nx, 0_nu_nu]
+    // 积分 exp(Ac*tau)*Bc d_tau 从 0 到 dt 得到 Bd。
+    // 这通过计算 exp([Ac Bc; 0 0] * dt) 并取其右上角块得到。
+    Eigen::MatrixXd M = Eigen::MatrixXd::Zero(nx_ + nu_, nx_ + nu_);
+    M.block(0, 0, nx_, nx_) = Ac_cont;
+    M.block(0, nx_, nx_, nu_) = Bc_cont;
+    // 最后 nu 行和列保持为零（根据 ZOH 增广）
+
+    // 计算 M * dt 的矩阵指数
+    // 明确传递 order 参数，解决“函数不接受 1 个参数”的编译错误
+    Eigen::MatrixXd expMdt = matrix_exponential_pade(M * dt, 6); // 明确传入默认的阶数 6
+
+    // 从结果中提取 Ad 和 Bd
+    Ad_disc = expMdt.block(0, 0, nx_, nx_);
+    Bd_disc = expMdt.block(0, nx_, nx_, nu_);
 }
+
+// 预计算MPC的核心矩阵 (Psi, Gamma, Q_bar, R_bar, H_qp)
+void MPC::precompute_mpc_matrices() {
+    // 预测时域的扩展矩阵
+    // Y_horizon = Psi * x_k + Gamma * U_horizon
+    // Psi: (N*ny x nx), Gamma: (N*ny x N*nu)
+
+    Psi_ = Eigen::MatrixXd::Zero(N_ * ny_, nx_);
+    Gamma_ = Eigen::MatrixXd::Zero(N_ * ny_, N_ * nu_);
+
+    Eigen::MatrixXd Ad_pow_i = Eigen::MatrixXd::Identity(nx_, nx_); // Ad^0 = I
+    Eigen::MatrixXd Ad_pow_ij; // 用于存储 Ad^(i-j)
+
+    for (int i = 0; i < N_; ++i) { // 遍历预测步长 (0 到 N-1)
+        // Psi 矩阵 (初始状态 x_k 对输出的影响)
+        // y_{k+i} = C * Ad^i * x_k + ...
+        Psi_.block(i * ny_, 0, ny_, nx_) = C_ * Ad_pow_i;
+
+        // Gamma 矩阵 (未来控制输入对输出的影响)
+        // y_{k+i} = ... + C * Ad^(i-j) * Bd * u_j + ...
+        Ad_pow_ij = Eigen::MatrixXd::Identity(nx_, nx_); // 为内层循环的 Ad^(i-j) 计算重置
+
+        for (int j = i; j >= 0; --j) { // 逆向遍历预测时域内的控制输入
+            // Gamma_ij = C * Ad^(i-j) * Bd
+            // 如果 j == i, Ad^(i-j) = Ad^0 = I
+            // 如果 j < i, Ad^(i-j) 通过 Ad_pow_ij 乘以 Ad_ 迭代计算。
+            // 这比从头重新计算幂次更高效。
+
+            if (j == i) {
+                Gamma_.block(i * ny_, j * nu_, ny_, nu_) = C_ * Bd_;
+            } else {
+                // Ad_pow_ij 从 I 开始。
+                // 对于 j = i-1, Ad_pow_ij 变为 Ad_ (Ad^(i-(i-1)) = Ad^1)
+                // 对于 j = i-2, Ad_pow_ij 变为 Ad_^2 (Ad^(i-(i-2)) = Ad^2) 等。
+                Ad_pow_ij *= Ad_; // 迭代计算 Ad^(i-j)
+                Gamma_.block(i * ny_, j * nu_, ny_, nu_) = C_ * Ad_pow_ij * Bd_;
+            }
+        }
+        Ad_pow_i *= Ad_; // 更新 Ad^i 用于下一次迭代 (Ad^(i+1))
+    }
+
+    // 构建块对角扩展权重矩阵 (Q_bar 和 R_bar)
+    Q_bar_ = Eigen::MatrixXd::Zero(N_ * ny_, N_ * ny_);
+    R_bar_ = Eigen::MatrixXd::Zero(N_ * nu_, N_ * nu_);
+
+    for (int i = 0; i < N_; ++i) {
+        Q_bar_.block(i * ny_, i * ny_, ny_, ny_) = Q_;
+        R_bar_.block(i * nu_, i * nu_, nu_, nu_) = R_;
+    }
+
+    // 构建 QP 问题的 H 矩阵
+    H_qp_ = Gamma_.transpose() * Q_bar_ * Gamma_ + R_bar_;
+}
+
 
 // 核心的 MPC 求解方法
 Eigen::MatrixXd MPC::solve(const Eigen::VectorXd& current_x,
@@ -78,10 +237,10 @@ Eigen::MatrixXd MPC::solve(const Eigen::VectorXd& current_x,
     try {
         // 严格的类型和维度检查
         if (current_x.rows() != nx_ || current_x.cols() != 1) {
-            throw std::invalid_argument("MPC::solve: current_x must be an (nx x 1) column vector.");
+            throw std::invalid_argument("MPC::solve: current_x 必须是一个 (nx x 1) 列向量。");
         }
         if (ref_horizon.rows() != N_ || ref_horizon.cols() != ny_) {
-            throw std::invalid_argument("MPC::solve: ref_horizon must be an (N x ny) matrix.");
+            throw std::invalid_argument("MPC::solve: ref_horizon 必须是一个 (N x ny) 矩阵。");
         }
 
         Eigen::MatrixXd H_qp;
@@ -89,39 +248,8 @@ Eigen::MatrixXd MPC::solve(const Eigen::VectorXd& current_x,
         // 构建 QP 问题的 H 和 f 矩阵
         build_mpc_qp_matrices(current_x, ref_horizon, H_qp, f_qp);
 
-        int num_vars_u_horizon = N_ * nu_; // U_horizon 的总变量数
-
         // 调用 QP 求解器
-        // =========================================================================
-        // ** Important Note: **
-        // At this point, you need to integrate an external Quadratic Programming (QP) solver library.
-        // Common open-source C++ QP solvers include:
-        // - qpOASES: Optimized for real-time applications, good performance.
-        // - OSQP: Another high-performance ADMM-based QP solver.
-        // - Eigen::QuadProg (unofficial Eigen module): If you're already using Eigen and have less strict requirements.
-        //
-        // The following code is a placeholder that simulates a solver returning an optimized control sequence.
-        // In a real application, you would call the API of your chosen QP library here.
-        // For example, if using qpOASES:
-        // qpOASES::QProblem qp_solver(num_vars_u_horizon, 0); // num_variables, num_constraints
-        // qpOASES::Options options;
-        // options.setTo=qpOASES::QPOASES_SETTING_DEFAULT;
-        // options.printLevel = qpOASES::PL_NONE; // Suppress output
-        // qp_solver.setOptions(options);
-        //
-        // // Assuming no bounds or linear constraints, or they are incorporated into H, f
-        // int nWSR = 10; // Number of working set recalculations
-        // qp_solver.init(H_qp.data(), f_qp.data(), nullptr, nullptr, nullptr, nullptr, nWSR);
-        // qp_solver.getPrimalSolution(u_horizon_optimized.data());
-        //
-        // If there are bound constraints lb <= u <= ub:
-        // Eigen::VectorXd lb = Eigen::VectorXd::Constant(num_vars_u_horizon, -5.0); // Example lower bounds
-        // Eigen::VectorXd ub = Eigen::VectorXd::Constant(num_vars_u_horizon, 5.0);   // Example upper bounds
-        // qp_solver.init(H_qp.data(), f_qp.data(), nullptr, nullptr, lb.data(), ub.data(), nWSR);
-        // qp_solver.getPrimalSolution(u_horizon_optimized.data());
-        // =========================================================================
-
-        Eigen::VectorXd u_horizon_optimized = solve_qp_placeholder(H_qp, f_qp, num_vars_u_horizon);
+        Eigen::VectorXd u_horizon_optimized = solve_qp(H_qp, f_qp, N_ * nu_);
 
         // 从优化后的序列中提取控制输入矩阵 (N x nu)
         // u_horizon_optimized 是一个 (N*nu x 1) 的列向量
@@ -135,7 +263,7 @@ Eigen::MatrixXd MPC::solve(const Eigen::VectorXd& current_x,
         return optimal_U_sequence;
 
     } catch (const std::exception& e) {
-        std::cerr << "[MPC::solve] Exception occurred: " << e.what() << std::endl;
+        std::cerr << "[MPC::solve] 发生异常: " << e.what() << std::endl;
         // 返回一个零矩阵作为错误处理的默认或占位符
         return Eigen::MatrixXd::Zero(N_, nu_);
     }
@@ -147,104 +275,79 @@ void MPC::build_mpc_qp_matrices(const Eigen::VectorXd& current_x,
                                 Eigen::MatrixXd& H_qp,
                                 Eigen::VectorXd& f_qp) const
 {
-    // 定义 QP 变量 U_horizon = [u_0; u_1; ...; u_{N-1}] (N*nu x 1)
-    int total_u_dim = N_ * nu_; // Total number of decision variables in U_horizon
+    // H_qp 直接使用预计算的成员变量
+    H_qp = H_qp_;
 
-    // Extended matrices for Prediction Horizon
-    // Y_horizon = Psi * x_k + Gamma * U_horizon
-    // Psi: (N*ny x nx), Gamma: (N*ny x N*nu)
-
-    Eigen::MatrixXd Psi = Eigen::MatrixXd::Zero(N_ * ny_, nx_);
-    Eigen::MatrixXd Gamma = Eigen::MatrixXd::Zero(N_ * ny_, N_ * nu_);
-
-    Eigen::MatrixXd Ad_pow = Eigen::MatrixXd::Identity(nx_, nx_); // Ad^0 = I (current Ad_ is Ad^1)
-
-    for (int i = 0; i < N_; ++i) { // Iterating through prediction steps (0 to N-1)
-        // Psi matrix (effect of initial state x_k on outputs)
-        // y_{k+i} = C * Ad^i * x_k + ...
-        Psi.block(i * ny_, 0, ny_, nx_) = C_ * Ad_pow;
-
-        // Gamma matrix (effect of future control inputs on outputs)
-        // y_{k+i} = ... + C * Ad^(i-j) * Bd * u_j + ...
-        for (int j = 0; j <= i; ++j) { // Iterating through past control inputs within the horizon
-            // Gamma_ij = C * Ad^(i-j) * Bd
-            if (j == i) { // Ad^0 term, i.e., direct effect of u_i on y_i
-                Gamma.block(i * ny_, j * nu_, ny_, nu_) = C_ * Bd_;
-            } else { // Ad^(i-j) term
-                Eigen::MatrixXd Ad_inner_pow = Eigen::MatrixXd::Identity(nx_, nx_);
-                for (int k = 0; k < (i - j); ++k) { // Calculate Ad^(i-j)
-                    Ad_inner_pow *= Ad_;
-                }
-                Gamma.block(i * ny_, j * nu_, ny_, nu_) = C_ * Ad_inner_pow * Bd_;
-            }
-        }
-        Ad_pow *= Ad_; // Update Ad^i for the next iteration (Ad^(i+1))
-    }
-
-    // Unroll ref_horizon into a long vector (N*ny x 1)
+    // 将 ref_horizon 展开成一个长向量 (N*ny x 1)
     Eigen::VectorXd R_vec = Eigen::VectorXd::Zero(N_ * ny_);
     for (int i = 0; i < N_; ++i) {
         R_vec.segment(i * ny_, ny_) = ref_horizon.row(i).transpose();
     }
 
-    // Build block-diagonal extended weight matrices (Q_bar and R_bar)
-    Eigen::MatrixXd Q_bar = Eigen::MatrixXd::Zero(N_ * ny_, N_ * ny_);
-    Eigen::MatrixXd R_bar = Eigen::MatrixXd::Zero(N_ * nu_, N_ * nu_);
+    // 构建 QP 问题的 f 向量
+    // f_qp = Gamma_.transpose() * Q_bar_ * (Psi_ * current_x - R_vec);
+    f_qp = Gamma_.transpose() * Q_bar_ * (Psi_ * current_x - R_vec);
 
-    for (int i = 0; i < N_; ++i) {
-        Q_bar.block(i * ny_, i * ny_, ny_, ny_) = Q_;
-        R_bar.block(i * nu_, i * nu_, nu_, nu_) = R_;
-    }
-
-    // Construct H and f matrices for the QP problem
-    // Objective function: J = 0.5 * U_horizon^T * H * U_horizon + f^T * U_horizon
-    H_qp = Gamma.transpose() * Q_bar * Gamma + R_bar;
-    f_qp = Gamma.transpose() * Q_bar * (Psi * current_x - R_vec);
-
-    // H_qp should theoretically be symmetric positive definite. For numerical stability,
-    // a small positive diagonal matrix is sometimes added (regularization).
+    // H_qp 理论上应该是对称正定的。为了数值稳定性，
+    // 有时可以添加一个小的正对角矩阵（正则化），
+    // 特别是当 H_qp 接近奇异或源自病态问题时。
     // H_qp += 1e-6 * Eigen::MatrixXd::Identity(total_u_dim, total_u_dim);
 }
 
 
-// QP 求解器占位符函数
-Eigen::VectorXd MPC::solve_qp_placeholder(const Eigen::MatrixXd& H_qp,
-                                          const Eigen::VectorXd& f_qp,
-                                          int nu_horizon)
+// 使用 qpOASES 的 QP 求解器函数
+Eigen::VectorXd MPC::solve_qp(const Eigen::MatrixXd& H_qp,
+                              const Eigen::VectorXd& f_qp,
+                              int nu_horizon)
 {
-    std::cout << "  (Placeholder) Calling a dummy QP solver...\n";
-    // This is a highly simplified example, purely for demonstrating the QP solver
-    // interface's inputs and outputs.
-    // In an unconstrained scenario, the optimal solution U = -H_inv * f.
-    // However, H_qp might not be invertible, or there might be constraints.
-    // A real QP solver would handle constraints (e.g., A*U <= b, l <= U <= u).
-
-    // For demonstration, we simply return a zero vector.
-    // ** Note: This will NOT produce correct optimization results; it's a placeholder! **
+    std::cout << "  正在调用 qpOASES QP 求解器...\n";
 
     Eigen::VectorXd u_horizon_optimized = Eigen::VectorXd::Zero(nu_horizon);
 
-    // ** This is where the actual integration of a QP solver would happen **
-    // Example with qpOASES (requires qpOASES library):
-    qpOASES::QProblem qp_solver(nu_horizon, 0); // num_variables, num_constraints
+    // 确保 H_qp 是对称的 (qpOASES 期望对称 H)
+    // H_qp = 0.5 * (H_qp + H_qp.transpose()); // 如果 H_qp 因为数值问题不完全对称，可能需要此行
+
+    // qpOASES 需要原始数据指针
+    qpOASES::real_t* H_data = const_cast<qpOASES::real_t*>(H_qp.data()); // qpOASES 期望 qpOASES::real_t*
+    qpOASES::real_t* f_data = const_cast<qpOASES::real_t*>(f_qp.data()); // qpOASES 期望 qpOASES::real_t*
+
+    // 创建一个 qpOASES QProblem 实例
+    // num_variables: 总的决策变量数
+    // num_constraints: 0 (本例中为无约束 QP)
+    qpOASES::QProblem qp_solver(nu_horizon, 0);
+
+    // 设置 qpOASES 选项
     qpOASES::Options options;
-    // options.setTo=qpOASES::QPOASES_SETTING_DEFAULT;
-    // options.printLevel = qpOASES::PL_NONE; // Suppress output
-    // qp_solver.setOptions(options);
-    //
-    // // Assuming no bounds or linear constraints, or they are merged into H, f
-    // int nWSR = 10; // Number of working set recalculations (for qpOASES)
-    // qp_solver.init(H_qp.data(), f_qp.data(), nullptr, nullptr, nullptr, nullptr, nWSR);
-    // qp_solver.getPrimalSolution(u_horizon_optimized.data());
-    //
-    // If boundary constraints lb <= u <= ub are present:
-    // Eigen::VectorXd lb = Eigen::VectorXd::Constant(nu_horizon, -5.0); // Example lower bounds
-    // Eigen::VectorXd ub = Eigen::VectorXd::Constant(nu_horizon, 5.0);   // Example upper bounds
-    // qp_solver.init(H_qp.data(), f_qp.data(), nullptr, nullptr, lb.data(), ub.data(), nWSR);
-    // qp_solver.getPrimalSolution(u_horizon_optimized.data());
+    // options.setTo=qpOASES::QPOASES_SETTING_DEFAULT; // 使用默认设置
+    options.printLevel = qpOASES::PL_LOW; // 抑制详细输出，但显示基本信息
+    qp_solver.setOptions(options);
 
+    // 工作集重新计算的最大次数 (nWSR) - 对性能很重要
+    // 典型值为 10-100；500 是一个安全的上限。
+    int nWSR = 500; // 工作集重新计算的最大次数
 
-    std::cout << "  (Placeholder) QP solver finished. Returning zeros for demo purposes.\n";
+    // 初始化并求解 QP 问题
+    // 参数: H_qp.data(), f_qp.data(), A_约束矩阵, lb_约束, ub_约束, lb_变量, ub_变量, nWSR
+    // 对于无约束 QP，A, lbA, ubA 为 nullptr。
+    // 如果需要，可以在此处添加控制输入 (u) 的下界和上界。
+    // 示例:
+    // Eigen::VectorXd lb = Eigen::VectorXd::Constant(nu_horizon, -10.0); // 示例下界
+    // Eigen::VectorXd ub = Eigen::VectorXd::Constant(nu_horizon, 10.0);  // 示例上界
+    // qpOASES::returnValue status = qp_solver.init(H_data, f_data, nullptr, nullptr, nullptr, lb.data(), ub.data(), nWSR);
+    //
+    // 目前，我们使用 nullptr 作为边界（无约束）
+    qpOASES::returnValue status = qp_solver.init(H_data, f_data, nullptr, nullptr, nullptr, nullptr, nullptr, nWSR);
+
+    if (status != qpOASES::SUCCESSFUL_RETURN) {
+        std::cerr << "  [MPC::solve_qp] qpOASES 求解器初始化失败，状态: " << status << std::endl;
+        // 根据应用，您可以抛出异常、返回零向量或使用备用策略。
+        throw std::runtime_error("QP 求解器初始化失败。");
+    }
+
+    // 获取原始解 (最优控制序列)
+    qp_solver.getPrimalSolution(u_horizon_optimized.data());
+
+    std::cout << "  qpOASES QP 求解器完成。\n";
     return u_horizon_optimized;
 }
 
@@ -257,42 +360,42 @@ std::pair<Eigen::MatrixXd, double> MPC::simulate_prediction(
     try {
         // 严格的类型和维度检查
         if (current_x.rows() != nx_ || current_x.cols() != 1) {
-            throw std::invalid_argument("MPC::simulate_prediction: current_x must be an (nx x 1) column vector.");
+            throw std::invalid_argument("MPC::simulate_prediction: current_x 必须是一个 (nx x 1) 列向量。");
         }
         if (u_horizon.rows() != N_ || u_horizon.cols() != nu_) {
-            throw std::invalid_argument("MPC::simulate_prediction: u_horizon must be an (N x nu) matrix.");
+            throw std::invalid_argument("MPC::simulate_prediction: u_horizon 必须是一个 (N x nu) 矩阵。");
         }
         if (ref_horizon.rows() != N_ || ref_horizon.cols() != ny_) {
-            throw std::invalid_argument("MPC::simulate_prediction: ref_horizon must be an (N x ny) matrix.");
+            throw std::invalid_argument("MPC::simulate_prediction: ref_horizon 必须是一个 (N x ny) 矩阵。");
         }
 
-        Eigen::MatrixXd predicted_outputs(N_, ny_); // N rows, ny columns for predicted outputs
+        Eigen::MatrixXd predicted_outputs(N_, ny_); // N 行, ny 列的预测输出
         double total_cost = 0.0;
-        Eigen::VectorXd x_k_pred = current_x; // Starting state for prediction
+        Eigen::VectorXd x_k_pred = current_x; // 预测的起始状态
 
         for (int i = 0; i < N_; ++i) {
-            Eigen::VectorXd u_k_i = u_horizon.row(i).transpose(); // Current control input (nu x 1)
-            Eigen::VectorXd r_k_i = ref_horizon.row(i).transpose(); // Current reference (ny x 1)
+            Eigen::VectorXd u_k_i = u_horizon.row(i).transpose(); // 当前控制输入 (nu x 1)
+            Eigen::VectorXd r_k_i = ref_horizon.row(i).transpose(); // 当前参考 (ny x 1)
 
-            // Predict output y(k+i|k) = C * x(k+i|k)
+            // 预测输出 y(k+i|k) = C * x(k+i|k)
             Eigen::VectorXd y_k_i = C_ * x_k_pred;
-            predicted_outputs.row(i) = y_k_i.transpose(); // Store predicted output as a row
+            predicted_outputs.row(i) = y_k_i.transpose(); // 将预测输出存储为一行
 
-            // Calculate output error cost: (y - r)^T Q (y - r)
+            // 计算输出误差成本: (y - r)^T Q (y - r)
             Eigen::VectorXd error_y = y_k_i - r_k_i;
             total_cost += error_y.transpose() * Q_ * error_y;
 
-            // Calculate control input cost: u^T R u
+            // 计算控制输入成本: u^T R u
             total_cost += u_k_i.transpose() * R_ * u_k_i;
 
-            // Predict next state: x(k+i+1|k) = Ad * x(k+i|k) + Bd * u(k+i)
+            // 预测下一个状态: x(k+i+1|k) = Ad * x(k+i|k) + Bd * u(k+i)
             x_k_pred = Ad_ * x_k_pred + Bd_ * u_k_i;
         }
         return {predicted_outputs, total_cost};
 
     } catch (const std::exception& e) {
-        std::cerr << "[MPC::simulate_prediction] Exception occurred: " << e.what() << std::endl;
-        // Return a zero matrix and zero cost in case of error
+        std::cerr << "[MPC::simulate_prediction] 发生异常: " << e.what() << std::endl;
+        // 错误时返回零矩阵和零成本
         return {Eigen::MatrixXd::Zero(N_, ny_), 0.0};
     }
 }
