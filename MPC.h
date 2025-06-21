@@ -66,6 +66,16 @@ public:
     const Eigen::MatrixXd& getBd() const { return Bd_; }
 
 
+public:
+    /**
+     * @brief 利用 Psi_ 和 Gamma_ 计算预测输出序列
+     * @param x_current 当前状态 (nx x 1)
+     * @param u_horizon 控制输入序列 (N*nu x 1)
+     * @return 预测输出序列 (N*ny x 1)
+     */
+    Eigen::VectorXd predict_y_horizon(const Eigen::VectorXd& x_current,
+                                      const Eigen::VectorXd& u_horizon) const;
+
 private:
     int N_;      // 预测时域
     int nx_;     // 状态变量数量
