@@ -1,10 +1,20 @@
 #include "MPC.h"
 #include <iostream>
 #include <stdexcept> // 必需，用于 std::runtime_error 和 std::invalid_argument
-#include <cmath>     // 必需，用于 std::fabs（Pade 近似）
+#include <vector>    // 必需，用于 std::vector
+#include <cmath>     // 必需，用于 std::fabs（Pade 近似）和 std::log2
 #include <limits>    // 必需，用于 std::numeric_limits
 
 
+// 假设 qpOASES 的头文件已在 MPC.h 中正确包含
+#include <qpOASES.hpp>
+
+/**
+ * @brief 辅助函数：使用 Pade 近似计算矩阵指数。
+ * @param M 要计算指数的方阵。
+ * @param order Pade 近似的阶数 (例如，6 表示 (6,6) 阶近似)。
+ * @return 矩阵 M 的指数，即 exp(M)。
+ */
 Eigen::MatrixXd matrix_exponential_pade(const Eigen::MatrixXd& M, int order) {
     if (M.rows() != M.cols()) {
         throw std::invalid_argument("matrix_exponential_pade: 输入矩阵必须是方阵。");
@@ -13,7 +23,7 @@ Eigen::MatrixXd matrix_exponential_pade(const Eigen::MatrixXd& M, int order) {
         throw std::invalid_argument("matrix_exponential_pade: Pade 近似阶数必须是非负数。");
     }
 
-    int n = static_cast<int>(M.rows()); // 显式转换为 int
+    int n = static_cast<int>(M.rows());
     if (n == 0) {
         return Eigen::MatrixXd::Identity(0, 0);
     }
@@ -35,14 +45,14 @@ Eigen::MatrixXd matrix_exponential_pade(const Eigen::MatrixXd& M, int order) {
     Eigen::MatrixXd A_5 = A_4 * A;
     Eigen::MatrixXd A_6 = A_5 * A;
 
-
+    // 使用标准的 (6,6) 阶 Pade 近似系数
     double c0 = 1.0;
     double c1 = 1.0 / 2.0;
-    double c2 = 1.0 / 8.0;
-    double c3 = 1.0 / 48.0;
-    double c4 = 1.0 / 384.0;
-    double c5 = 1.0 / 3840.0;
-    double c6 = 1.0 / 46080.0;
+    double c2 = 1.0 / 9.0;
+    double c3 = 1.0 / 72.0;
+    double c4 = 1.0 / 1008.0;
+    double c5 = 1.0 / 30240.0;
+    double c6 = 1.0 / 1209600.0;
 
     Eigen::MatrixXd N_Pade = c0 * Eigen::MatrixXd::Identity(n, n)
                              + c1 * A
@@ -77,14 +87,15 @@ Eigen::MatrixXd matrix_exponential_pade(const Eigen::MatrixXd& M, int order) {
 
 
 // MPC 控制器的构造函数
-MPC::MPC(int N,
+MPC::MPC(int N_p,
+         int N_c, // 控制时域 Nc
          const Eigen::MatrixXd& Ac,
          const Eigen::MatrixXd& Bc,
          const Eigen::MatrixXd& C,
          const Eigen::MatrixXd& Q,
          const Eigen::MatrixXd& R,
          double dt)
-    : N_(N), dt_(dt), C_(C), Q_(Q), R_(R)
+    : N_p_(N_p), N_c_(N_c), dt_(dt), C_(C), Q_(Q), R_(R) // 初始化 N_c_
 {
     nx_ = static_cast<int>(Ac.rows()); // rows 是行数
     nu_ = static_cast<int>(Bc.cols()); // cols 是列数
@@ -96,8 +107,8 @@ MPC::MPC(int N,
             R.rows() != nu_ || R.cols() != nu_) {
             throw std::invalid_argument("输入矩阵维度不一致。");
         }
-        if (N_ <= 0 || dt_ <= std::numeric_limits<double>::epsilon()) { // 检查是否大于一个小的 epsilon
-            throw std::invalid_argument("预测时域 N 必须为正，采样时间 dt 必须为正。");
+        if (N_p_ <= 0 || N_c_ <= 0 || N_c_ > N_p_ || dt_ <= std::numeric_limits<double>::epsilon()) { // 检查 N_c_ 和 dt 的 epsilon
+            throw std::invalid_argument("预测时域 Np 必须为正，控制时域 Nc 必须为正且不大于 Np，采样时间 dt 必须为正。");
         }
 
         discretize_model(Ac, Bc, dt_, Ad_, Bd_);
@@ -106,7 +117,8 @@ MPC::MPC(int N,
 
         // 打印初始化信息
         std::cout << "MPC controller initialized:\n";
-        std::cout << "  Prediction horizon (N): " << N_ << "\n";
+        std::cout << "  Prediction horizon (Np): " << N_p_ << "\n";
+        std::cout << "  Control horizon (Nc): " << N_c_ << "\n"; // 打印 Nc
         std::cout << "  Sampling time (dt): " << dt_ << "\n";
         std::cout << "  State dimension (nx): " << nx_ << "\n";
         std::cout << "  Input dimension (nu): " << nu_ << "\n";
@@ -116,8 +128,8 @@ MPC::MPC(int N,
         std::cout << "  C:\n" << C_ << "\n";
         std::cout << "  Q:\n" << Q_ << "\n";
         std::cout << "  R:\n" << R_ << "\n";
-        std::cout << "  Precomputed Psi:\n" << Psi_ << "\n";
-        std::cout << "  Precomputed Gamma:\n" << Gamma_ << "\n";
+        std::cout << "  Precomputed Phi:\n" << Phi_ << "\n"; // Psi 重命名为 Phi
+        std::cout << "  Precomputed G:\n" << G_ << "\n";   // Gamma 重命名为 G
         std::cout << "  Precomputed H_qp:\n" << H_qp_ << "\n";
 
 
@@ -127,6 +139,15 @@ MPC::MPC(int N,
     }
 }
 
+/**
+ * @brief 将连续时间状态空间模型离散化为离散时间模型。
+ * 使用零阶保持 (ZOH) 方法，通过计算矩阵指数实现。
+ * @param Ac_cont 连续时间 A 矩阵。
+ * @param Bc_cont 连续时间 B 矩阵。
+ * @param dt 采样时间。
+ * @param Ad_disc 离散化后的 A 矩阵引用。
+ * @param Bd_disc 离散化后的 B 矩阵引用。
+ */
 void MPC::discretize_model(const Eigen::MatrixXd& Ac_cont,
                            const Eigen::MatrixXd& Bc_cont,
                            double dt,
@@ -149,61 +170,106 @@ void MPC::discretize_model(const Eigen::MatrixXd& Ac_cont,
     Bd_disc = expMdt.block(0, nx_, nx_, nu_);
 }
 
+/**
+ * @brief 预计算 MPC 的常量矩阵 (Phi, G, Q_bar, R_bar, H_qp)。
+ * 此方法在构造函数中调用一次，以避免在 solve 方法中重复计算，
+ * 如果系统模型或权重不发生变化。
+ */
 void MPC::precompute_mpc_matrices() {
 
-    Psi_ = Eigen::MatrixXd::Zero(N_ * ny_, nx_);
-    Gamma_ = Eigen::MatrixXd::Zero(N_ * ny_, N_ * nu_);
+    Phi_ = Eigen::MatrixXd::Zero(N_p_ * ny_, nx_);   // Phi 矩阵，维度 Np*p x n
+    G_ = Eigen::MatrixXd::Zero(N_p_ * ny_, N_c_ * nu_); // G 矩阵，维度 Np*p x Nc*m
 
-    Eigen::MatrixXd Ad_pow_i = Eigen::MatrixXd::Identity(nx_, nx_); // Ad^0 = I
-    Eigen::MatrixXd Ad_pow_ij; // 用于存储 Ad^(i-j)
-
-    // 计算冗余，可优化，但实时计算时不需要计算Gamma_和Psi_，因此可以不优化。
-    for (int i = 0; i < N_; ++i) { // 遍历预测步长 (0 到 N-1)
-
-        Psi_.block(i * ny_, 0, ny_, nx_) = C_ * Ad_pow_i;
-
-        Ad_pow_ij = Eigen::MatrixXd::Identity(nx_, nx_); // 为内层循环的 Ad^(i-j) 计算重置
-
-        for (int j = i; j >= 0; --j) { // 逆向遍历预测时域内的控制输入
-
-            if (j == i) {
-                Gamma_.block(i * ny_, j * nu_, ny_, nu_) = C_ * Bd_;
-            } else {
-                Ad_pow_ij *= Ad_; // 迭代计算 Ad^(i-j)
-                Gamma_.block(i * ny_, j * nu_, ny_, nu_) = C_ * Ad_pow_ij * Bd_;
-            }
-        }
-        Ad_pow_i *= Ad_; // 更新 Ad^i 用于下一次迭代 (Ad^(i+1))
+    // 修改: 使用显式乘法预先计算 Ad_ 的幂，以避免使用 .pow() 并提高效率。
+    std::vector<Eigen::MatrixXd> Ad_powers(N_p_ + 1);
+    Ad_powers[0] = Eigen::MatrixXd::Identity(nx_, nx_); // Ad^0 = I
+    for (int k = 1; k <= N_p_; ++k) {
+        Ad_powers[k] = Ad_powers[k - 1] * Ad_;
     }
 
-    Q_bar_ = Eigen::MatrixXd::Zero(N_ * ny_, N_ * ny_);
-    R_bar_ = Eigen::MatrixXd::Zero(N_ * nu_, N_ * nu_);
+    // 计算 Phi 矩阵和 G 矩阵
+    // Phi_：代表初始状态 x(k) 对未来预测输出 Y_p 的影响
+    // G_：代表未来控制输入序列 U_c 对未来预测输出 Y_p 的影响
 
-    for (int i = 0; i < N_; ++i) {
+    for (int i = 0; i < N_p_; ++i) { // 遍历预测时域的输出步 (0 到 N_p_-1)，对应 y(k+1|k) 到 y(k+N_p|k)
+
+        // 计算 Phi 矩阵的第 i 行块 (对应 y(k+i+1|k) 中 x(k) 的系数)
+        // y(k+i+1|k) 的状态项系数为 C * A^(i+1)
+        // 修改: 使用预先计算的幂
+        Phi_.block(i * ny_, 0, ny_, nx_) = C_ * Ad_powers[i + 1];
+
+        // 计算 G 矩阵的第 i 行块 (对应 y(k+i+1|k) 中 u 序列的系数)
+        for (int j = 0; j < N_c_; ++j) { // 遍历控制时域的输入步 (0 到 N_c_-1)，对应 u(k) 到 u(k+N_c-1)
+            if (i >= j) { // 如果当前输出步受当前输入步影响 (未来输入不会影响过去输出)
+                // 计算 C * A^(i-j) * B
+                // 这是 u(k+j) 对 x(k+i+1|k) 的直接影响，再乘以 C 得到对 y(k+i+1|k) 的影响。
+                // 修改: 使用预先计算的幂
+                G_.block(i * ny_, j * nu_, ny_, nu_) = C_ * Ad_powers[i - j] * Bd_;
+            }
+        }
+
+        // 处理控制输入在控制时域 N_c_ 之后保持不变的情况
+        // 对于预测时域中超出控制时域的部分 (i >= N_c_)，
+        // 即 y(k+i+1|k) 当 i >= N_c_ 时，受 u(k+N_c_-1) 的影响是累积的。
+        // 这部分累积效应需要 *添加* 到 G 矩阵的最后一列（j = N_c - 1）的对应块中。
+        if (i >= N_c_) {
+            Eigen::MatrixXd sum_CA_powers_B = Eigen::MatrixXd::Zero(ny_, nu_);
+            // 累加由 u(k+Nc), u(k+Nc+1), ..., u(k+i) 引起的效应，这些输入都等于 u(k+Nc-1)
+            // 对应于 C*A^(i-Nc)*B, C*A^(i-Nc-1)*B, ..., C*A^0*B 的和
+            for (int s_idx = 0; s_idx <= (i - N_c_); ++s_idx) {
+                // 修改: 使用预先计算的幂
+                sum_CA_powers_B += C_ * Ad_powers[s_idx] * Bd_;
+            }
+            // 修正: 从 '=' 改为 '+='。效应是累积的，必须添加到上面循环中已计算的 u(k+Nc-1) 的项上。
+            G_.block(i * ny_, (N_c_ - 1) * nu_, ny_, nu_) += sum_CA_powers_B;
+        }
+    }
+
+
+    // 构建块对角权重矩阵 Q_bar 和 R_bar
+    Q_bar_ = Eigen::MatrixXd::Zero(N_p_ * ny_, N_p_ * ny_); // 输出权重矩阵，维度 Np*p x Np*p
+    R_bar_ = Eigen::MatrixXd::Zero(N_c_ * nu_, N_c_ * nu_); // 输入权重矩阵，维度 Nc*m x Nc*m
+
+    for (int i = 0; i < N_p_; ++i) { // 遍历预测时域，填充 Q_bar_
         Q_bar_.block(i * ny_, i * ny_, ny_, ny_) = Q_;
+    }
+
+    for (int i = 0; i < N_c_; ++i) { // 遍历控制时域，填充 R_bar_
         R_bar_.block(i * nu_, i * nu_, nu_, nu_) = R_;
     }
 
-    // 构建 QP 问题的 H 矩阵
-    H_qp_ = Gamma_.transpose() * Q_bar_ * Gamma_ + R_bar_;
+    // 构建 QP 问题的 Hessian 矩阵 H_qp
+    // H_qp = G_^T * Q_bar_ * G_ + R_bar_
+    H_qp_ = G_.transpose() * Q_bar_ * G_ + R_bar_; // H_qp = G^T * Q_bar * G + R_bar
+        // 注意：QP 目标函数是 0.5 * X^T * H * X + g^T * X。
+        // 而一些推导中的 J 包含 1/2，导致 H = 2 * (...)。
+        // qpOASES 使用 0.5 * x'Hx + g'x 的形式，因此 H_qp_ 不应包含因子 2。
 
-    if (H_qp_.rows() != N_ * nu_ || H_qp_.cols() != N_ * nu_) {
+    // 验证 H_qp 的最终维度
+    if (H_qp_.rows() != N_c_ * nu_ || H_qp_.cols() != N_c_ * nu_) {
         throw std::runtime_error("预计算的 H_qp 矩阵维度不正确。");
     }
 }
 
 
-// 核心的 MPC 求解方法
+/**
+ * @brief 求解 MPC 问题，预测并返回最优控制输入序列。
+ * 此方法将构建二次规划 (QP) 问题并尝试求解。
+ * @param current_x 当前状态向量 (nx x 1)。
+ * @param ref_horizon 预测时域内的参考轨迹 (Np x ny)。
+ * @return 最优控制输入序列 (Nc x nu)。在实际中通常只取第一个控制量。
+ */
 Eigen::MatrixXd MPC::solve(const Eigen::VectorXd& current_x,
                            const Eigen::MatrixXd& ref_horizon)
 {
     try {
         // 严格的类型和维度检查
         if (current_x.rows() != nx_ || current_x.cols() != 1) {
-            throw std::invalid_argument("MPC::solve: current_x 必须是一个 (nx x 1) 列向量。");
+            throw std::invalid_argument("MPC::solve: current_x must be an (nx x 1) column vector.");
         }
-        if (ref_horizon.rows() != N_ || ref_horizon.cols() != ny_) {
-            throw std::invalid_argument("MPC::solve: ref_horizon 必须是一个 (N x ny) 矩阵。");
+        // ref_horizon 是 N_p x ny
+        if (ref_horizon.rows() != N_p_ || ref_horizon.cols() != ny_) { // 检查预测时域 N_p_ 和输出维度 ny_
+            throw std::invalid_argument("MPC::solve: ref_horizon must be an (Np x ny) matrix.");
         }
 
         Eigen::MatrixXd H_qp;
@@ -212,48 +278,64 @@ Eigen::MatrixXd MPC::solve(const Eigen::VectorXd& current_x,
         build_mpc_qp_matrices(current_x, ref_horizon, H_qp, f_qp);
 
         // 调用 QP 求解器
-        Eigen::VectorXd u_horizon_optimized = solve_qp(H_qp, f_qp, N_ * nu_);
+        Eigen::VectorXd u_horizon_optimized = solve_qp(H_qp, f_qp, N_c_ * nu_); // 传递控制时域的总输入变量数 N_c_ * nu_
 
-        Eigen::MatrixXd optimal_U_sequence(N_, nu_);
-        for (int i = 0; i < N_; ++i) {
+        // 打印最终的成本
+        Eigen::MatrixXd J = u_horizon_optimized.transpose() * H_qp * u_horizon_optimized / 2.0 + f_qp.transpose() * u_horizon_optimized;
+        std::cout << "MPC Cost: " << J(0, 0) << std::endl;
+
+        // 将优化后的控制输入向量重塑为 (N_c x nu) 矩阵
+        Eigen::MatrixXd optimal_U_sequence(N_c_, nu_);
+        for (int i = 0; i < N_c_; ++i) {
             optimal_U_sequence.row(i) = u_horizon_optimized.segment(i * nu_, nu_).transpose();
         }
-        // // 替代方法
-        // Eigen::MatrixXd optimal_U_sequence = Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>(
-        //                          u_horizon_optimized.data(), N_, nu_)
-        //                          .array();
 
         return optimal_U_sequence;
 
     } catch (const std::exception& e) {
         std::cerr << "[MPC::solve] 发生异常: " << e.what() << std::endl;
-        return Eigen::MatrixXd::Zero(N_, nu_);
+        return Eigen::MatrixXd::Zero(N_c_, nu_); // 发生错误时返回零矩阵，保持正确维度 N_c_ x nu_
     }
 }
 
-// 构建MPC问题的H和f矩阵
+/**
+ * @brief 构建 MPC 问题的 H 和 f 矩阵，用于 QP 求解器。
+ * MPC 目标函数: J = sum_{i=0}^{Np-1} (y_i - r_i)^T Q (y_i - r_i) + u_i^T R u_i
+ * 转换为 QP 形式: min 0.5 * U_horizon^T * H * U_horizon + f^T * U_horizon
+ * @param current_x 当前状态。
+ * @param ref_horizon 预测时域内的参考轨迹。
+ * @param H_qp QP 问题中的 H 矩阵引用 (将被赋值为 H_qp_)。
+ * @param f_qp QP 问题中的 f 向量引用。
+ */
 void MPC::build_mpc_qp_matrices(const Eigen::VectorXd& current_x,
                                 const Eigen::MatrixXd& ref_horizon,
                                 Eigen::MatrixXd& H_qp,
                                 Eigen::VectorXd& f_qp) const
 {
+    // H 矩阵已经预计算好，直接赋值
     H_qp = H_qp_;
 
-    // // 将 ref_horizon (N*ny) 展开成一个长向量 (N*ny x 1)
-    // Eigen::VectorXd R_vec = Eigen::VectorXd::Zero(N_ * ny_);
-    // for (int i = 0; i < N_; ++i) {
-    //     R_vec.segment(i * ny_, ny_) = ref_horizon.row(i).transpose();
-    // }
-
-    Eigen::VectorXd R_vec = ref_horizon.reshaped().eval();
+    // 将 ref_horizon (Np x ny) 展开成一个长向量 (Np*ny x 1)
+    Eigen::VectorXd R_vec = Eigen::VectorXd::Zero(N_p_ * ny_);
+    for (int i = 0; i < N_p_; ++i) {
+        R_vec.segment(i * ny_, ny_) = ref_horizon.row(i).transpose();
+    }
 
     // 构建 QP 问题的 f 向量
-    f_qp = Gamma_.transpose() * Q_bar_ * (Psi_ * current_x - R_vec);
-
+    // f_qp = G_^T * Q_bar_ * (Phi_ * current_x - R_vec);
+    Eigen::VectorXd error_free = Phi_ * current_x - R_vec;
+    f_qp = G_.transpose() * Q_bar_ * error_free;
 }
 
 
-// 使用 qpOASES 的 QP 求解器函数
+/**
+ * @brief 使用 qpOASES 求解二次规划 (QP) 问题。
+ * 此函数集成了 qpOASES 库以找到最优控制序列。
+ * @param H_qp QP 问题中的 H 矩阵。
+ * @param f_qp QP 问题中的 f 向量。
+ * @param nu_horizon 控制输入序列的总维度 (Nc * nu)。
+ * @return 优化后的控制输入序列 (Nc*nu x 1) 向量。
+ */
 Eigen::VectorXd MPC::solve_qp(const Eigen::MatrixXd& H_qp,
                               const Eigen::VectorXd& f_qp,
                               int nu_horizon)
@@ -262,12 +344,10 @@ Eigen::VectorXd MPC::solve_qp(const Eigen::MatrixXd& H_qp,
 
     Eigen::VectorXd u_horizon_optimized = Eigen::VectorXd::Zero(nu_horizon);
 
-    // 确保 H_qp 是对称的 (qpOASES 期望对称 H)
-    // H_qp = 0.5 * (H_qp + H_qp.transpose()); // 如果 H_qp 因为数值问题不完全对称，可能需要此行
-
-    // qpOASES 需要原始数据指针
-    qpOASES::real_t* H_data = const_cast<qpOASES::real_t*>(H_qp.data()); // qpOASES 期望 qpOASES::real_t*
-    qpOASES::real_t* f_data = const_cast<qpOASES::real_t*>(f_qp.data()); // qpOASES 期望 qpOASES::real_t*
+    // qpOASES 需要 C-style 数组 (原始数据指针)
+    // Eigen 默认是列主序，qpOASES 的 H 需要是列主序的数组
+    qpOASES::real_t* H_data = const_cast<qpOASES::real_t*>(H_qp.data());
+    qpOASES::real_t* f_data = const_cast<qpOASES::real_t*>(f_qp.data());
 
     // 创建一个 qpOASES QProblem 实例
     // num_variables: 总的决策变量数
@@ -276,31 +356,36 @@ Eigen::VectorXd MPC::solve_qp(const Eigen::MatrixXd& H_qp,
 
     // 设置 qpOASES 选项
     qpOASES::Options options;
-    // options.setTo=qpOASES::QPOASES_SETTING_DEFAULT; // 使用默认设置
-    options.printLevel = qpOASES::PL_LOW; // 抑制详细输出，但显示基本信息
+    options.printLevel = qpOASES::PL_LOW; // 抑制详细输出，只显示基本信息
     qp_solver.setOptions(options);
 
-    // 工作集重新计算的最大次数 (nWSR) - 对性能很重要
-    // 典型值为 10-100；500 是一个安全的上限。
-    int nWSR = 500; // 工作集重新计算的最大次数
+    // 工作集重新计算的最大次数 (nWSR)
+    int nWSR = 500;
 
 
     qpOASES::returnValue status = qp_solver.init(H_data, f_data, nullptr, nullptr, nullptr, nullptr, nullptr, nWSR);
 
     if (status != qpOASES::SUCCESSFUL_RETURN) {
-        std::cerr << "  [MPC::solve_qp] qpOASES 求解器初始化失败，状态: " << status << std::endl;
-        // 根据应用，您可以抛出异常、返回零向量或使用备用策略。
+        // std::cerr << "  [MPC::solve_qp] qpOASES solver initialization failed, status: " << qpOASES::getSimpleStatusMessage(status) << std::endl;
         throw std::runtime_error("QP 求解器初始化失败。");
     }
 
     // 获取原始解 (最优控制序列)
-    qp_solver.getPrimalSolution(u_horizon_optimized.data());
+    qpOASES::real_t* sol_data = u_horizon_optimized.data();
+    qp_solver.getPrimalSolution(sol_data);
 
     std::cout << "  qpOASES QP solver finished.\n";
     return u_horizon_optimized;
 }
 
-// 模拟MPC控制下的系统预测轨迹和成本
+/**
+ * @brief 模拟 MPC 控制下的系统预测轨迹和成本。
+ * 这是一个辅助函数，用于验证给定控制输入序列的效果，不进行优化。
+ * @param current_x 初始状态。
+ * @param u_horizon 要应用的控制输入序列 (Nc x nu)。
+ * @param ref_horizon 参考轨迹 (Np x ny)。
+ * @return 包含预测输出轨迹 (MatrixXd) 和总成本 (double) 的 pair。
+ */
 std::pair<Eigen::MatrixXd, double> MPC::simulate_prediction(
     const Eigen::VectorXd& current_x,
     const Eigen::MatrixXd& u_horizon,
@@ -309,21 +394,27 @@ std::pair<Eigen::MatrixXd, double> MPC::simulate_prediction(
     try {
         // 严格的类型和维度检查
         if (current_x.rows() != nx_ || current_x.cols() != 1) {
-            throw std::invalid_argument("MPC::simulate_prediction: current_x 必须是一个 (nx x 1) 列向量。");
+            throw std::invalid_argument("MPC::simulate_prediction: current_x must be an (nx x 1) column vector.");
         }
-        if (u_horizon.rows() != N_ || u_horizon.cols() != nu_) {
-            throw std::invalid_argument("MPC::simulate_prediction: u_horizon 必须是一个 (N x nu) 矩阵。");
+        if (u_horizon.rows() != N_c_ || u_horizon.cols() != nu_) { // u_horizon 维度为 Nc x nu
+            throw std::invalid_argument("MPC::simulate_prediction: u_horizon must be an (Nc x nu) matrix.");
         }
-        if (ref_horizon.rows() != N_ || ref_horizon.cols() != ny_) {
-            throw std::invalid_argument("MPC::simulate_prediction: ref_horizon 必须是一个 (N x ny) 矩阵。");
+        if (ref_horizon.rows() != N_p_ || ref_horizon.cols() != ny_) { // ref_horizon 维度为 Np x ny
+            throw std::invalid_argument("MPC::simulate_prediction: ref_horizon must be an (Np x ny) matrix.");
         }
 
-        Eigen::MatrixXd predicted_outputs(N_, ny_); // N 行, ny 列的预测输出
+        Eigen::MatrixXd predicted_outputs(N_p_, ny_); // 预测输出矩阵，维度 Np x ny
         double total_cost = 0.0;
         Eigen::VectorXd x_k_pred = current_x; // 预测的起始状态
 
-        for (int i = 0; i < N_; ++i) {
-            Eigen::VectorXd u_k_i = u_horizon.row(i).transpose(); // 当前控制输入 (nu x 1)
+        for (int i = 0; i < N_p_; ++i) { // 遍历预测时域 N_p_
+            Eigen::VectorXd u_k_i;
+            if (i < N_c_) { // 在控制时域内，使用实际优化后的输入
+                u_k_i = u_horizon.row(i).transpose(); // 当前控制输入 (nu x 1)
+            } else { // 超出控制时域的步长，使用控制时域的最后一个输入
+                u_k_i = u_horizon.row(N_c_ - 1).transpose();
+            }
+
             Eigen::VectorXd r_k_i = ref_horizon.row(i).transpose(); // 当前参考 (ny x 1)
 
             // 预测输出 y(k+i|k) = C * x(k+i|k)
@@ -335,7 +426,9 @@ std::pair<Eigen::MatrixXd, double> MPC::simulate_prediction(
             total_cost += error_y.transpose() * Q_ * error_y;
 
             // 计算控制输入成本: u^T R u
-            total_cost += u_k_i.transpose() * R_ * u_k_i;
+            if (i < N_c_) { // 仅惩罚控制时域内的输入
+                total_cost += u_k_i.transpose() * R_ * u_k_i;
+            }
 
             // 预测下一个状态: x(k+i+1|k) = Ad * x(k+i|k) + Bd * u(k+i)
             x_k_pred = Ad_ * x_k_pred + Bd_ * u_k_i;
@@ -344,11 +437,17 @@ std::pair<Eigen::MatrixXd, double> MPC::simulate_prediction(
 
     } catch (const std::exception& e) {
         std::cerr << "[MPC::simulate_prediction] 发生异常: " << e.what() << std::endl;
-        // 错误时返回零矩阵和零成本
-        return {Eigen::MatrixXd::Zero(N_, ny_), 0.0};
+        // 发生错误时返回零矩阵和零成本
+        return {Eigen::MatrixXd::Zero(N_p_, ny_), 0.0};
     }
 }
 
+/**
+ * @brief 利用 Phi_ 和 G_ 计算预测输出序列。
+ * @param x_current 当前状态 (nx x 1)。
+ * @param u_horizon 控制输入序列 (Nc*nu x 1)。
+ * @return 预测输出序列 (Np*ny x 1)。
+ */
 Eigen::VectorXd MPC::predict_y_horizon(const Eigen::VectorXd& x_current,
                                        const Eigen::VectorXd& u_horizon) const
 {
@@ -356,9 +455,10 @@ Eigen::VectorXd MPC::predict_y_horizon(const Eigen::VectorXd& x_current,
     if (x_current.rows() != nx_ || x_current.cols() != 1) {
         throw std::invalid_argument("predict_y_horizon: x_current 必须是 (nx x 1) 列向量。");
     }
-    if (u_horizon.rows() != N_ * nu_ || u_horizon.cols() != 1) {
-        throw std::invalid_argument("predict_y_horizon: u_horizon 必须是 (N*nu x 1) 列向量。");
+    // u_horizon 维度为 (Nc*nu x 1)
+    if (u_horizon.rows() != N_c_ * nu_ || u_horizon.cols() != 1) { // 检查 N_c_
+        throw std::invalid_argument("predict_y_horizon: u_horizon 必须是 (Nc*nu x 1) 列向量。");
     }
-    // 计算 y_horizon = Psi_ * x_current + Gamma_ * u_horizon
-    return Psi_ * x_current + Gamma_ * u_horizon;// N*ny×1
+    // 计算 y_horizon = Phi_ * x_current + G_ * u_horizon
+    return Phi_ * x_current + G_ * u_horizon;// 结果维度为 (Np*ny x 1)
 }

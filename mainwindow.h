@@ -29,6 +29,7 @@ private:
     QLineSeries *BlueSeries;  // 用于绘制实际系统输出
     QLineSeries *RedSeries;   // 用于绘制参考轨迹
     QLineSeries *GreenSeries; // 用于绘制控制输入（可选）
+    QLineSeries *BlackSeries; // 用于绘制误差（可选）
 
     QChart *chart;
     QChart *chart2; // 第二个图表
