@@ -59,21 +59,29 @@ MainWindow::MainWindow(QWidget *parent)
     ui->charts_3->setRenderHint(QPainter::Antialiasing); // 抗锯齿
 
 
-    Eigen::MatrixXd Ac(2, 2);
-    Ac << 0.00, 1,
-          -50, -5;
-    Eigen::MatrixXd Bc(2, 1);
-    Bc << 0,
-          5;
-    Eigen::MatrixXd C(1, 2);
-    C << 1, 0;
+    // Eigen::MatrixXd Ac(2, 2);
+    // Ac << 0.00, 1,
+    //       -50, -5;
+    // Eigen::MatrixXd Bc(2, 1);
+    // Bc << 0,
+    //       5;
+    // Eigen::MatrixXd C(1, 2);
+    // C << 1, 0;
+
+    Eigen::MatrixXd Ac(1, 1);
+    Ac << 0;
+    Eigen::MatrixXd Bc(1, 1);
+    Bc << 1;
+    Eigen::MatrixXd C(1, 1);
+    C << 1;
+
     Eigen::MatrixXd Q(1, 1);
     Q << 100; // 输出误差权重矩阵
     Eigen::MatrixXd R(1, 1);
     R << 0.01; // 控制输入权重矩阵
-    double dt = 0.02; // 采样时间
-    int Np = 150; // 预测时域长度
-    int Nc = 100; // 控制时域长度
+    double dt = 0.01; // 采样时间
+    int Np = 5; // 预测时域长度
+    int Nc = 5; // 控制时域长度
 
     mpcController = new MPC(Np, Nc, Ac, Bc, C, Q, R, dt); // dt
 
@@ -83,7 +91,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 
     Eigen::VectorXd current_x = Eigen::VectorXd::Zero(nx); // 当前状态
-    current_x << 0, 0; // 初始状态
+    // current_x << 0; // 初始状态
 
     Eigen::MatrixXd ref_horizon = Eigen::MatrixXd::Ones(Np, ny) * 1; // 参考轨迹
     for (int i = 0; i < Nc / 3; ++i) {
