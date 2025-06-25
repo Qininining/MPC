@@ -38,8 +38,19 @@ public:
         const Eigen::MatrixXd& C,
         const Eigen::MatrixXd& Q,
         const Eigen::MatrixXd& R,
-        double dt);
+        double dt,
+        bool incremental = false); // 是否使用增量控制优化
 
+    /**
+     * @brief solve 方法，根据incremental_，求解 MPC 问题，预测并返回最优控制输入序列。
+     * @param ref_horizon 预测时域内的参考轨迹 (Np x ny)。
+     * @param current_x 当前状态向量 (nx x 1)。
+     * @param u_last 上一时刻的控制输入 (nu x 1)。如果为空，则使用内部存储的值。
+     * @return
+     */
+    Eigen::MatrixXd solve(const Eigen::MatrixXd& ref_horizon,
+                          const Eigen::VectorXd& current_x,
+                          const Eigen::VectorXd& u_last = Eigen::VectorXd());
     /**
      * @brief 求解 MPC 问题，预测并返回最优控制输入序列。
      * 此方法将构建二次规划 (QP) 问题并尝试求解。
@@ -47,8 +58,20 @@ public:
      * @param ref_horizon 预测时域内的参考轨迹 (Np x ny)。
      * @return 最优控制输入序列 (Nc x nu)。在实际中通常只取第一个控制量。
      */
-    Eigen::MatrixXd solve(const Eigen::VectorXd& current_x,
-                          const Eigen::MatrixXd& ref_horizon);
+    Eigen::MatrixXd solve_direct(const Eigen::MatrixXd& ref_horizon,
+                          const Eigen::VectorXd& current_x);
+
+    //
+    /**
+     * @brief 求解增量控制优化问题，返回增量控制输入序列。
+     * @param current_x 当前状态向量 (nx x 1)。
+     * @param ref_horizon 预测时域内的参考轨迹 (Np x ny)。
+     * @param u_last 上一时刻的控制输入 (nu x 1)。如果为空，则使用内部存储的值。
+     * @return 最优增量控制输入序列 (Nc x nu)。在实际中通常只取第一个增量控制量。
+     */
+    Eigen::MatrixXd solve_incremental(const Eigen::MatrixXd& ref_horizon,
+                                      const Eigen::VectorXd& current_x,
+                                      const Eigen::VectorXd& u_last = Eigen::VectorXd());
 
     /**
      * @brief 模拟 MPC 控制下的系统预测轨迹和成本。
@@ -76,7 +99,10 @@ public:
      * @return 预测输出序列 (Np*ny x 1)。
      */
     Eigen::VectorXd predict_y_horizon(const Eigen::VectorXd& x_current,
-                                      const Eigen::VectorXd& u_horizon) const;
+                                      const Eigen::VectorXd& u_horizon,
+                                      const Eigen::VectorXd& u_last = Eigen::VectorXd()) const;
+
+
 
 private:
     int N_p_;     // 预测时域
@@ -97,7 +123,19 @@ private:
     Eigen::MatrixXd G_;        // G 矩阵，用于预测
     Eigen::MatrixXd Q_bar_;    // 块对角扩展输出权重矩阵
     Eigen::MatrixXd R_bar_;    // 块对角扩展输入权重矩阵
+    // 定义直接求uk的 Hessian 矩阵
     Eigen::MatrixXd H_qp_;     // QP 问题的预计算 Hessian 矩阵
+
+
+    //用于增量控制优化
+    bool incremental_; // 是否使用增量控制优化
+    Eigen::MatrixXd G_incremental_; // 用于增量控制优化的 G 矩阵
+    Eigen::VectorXd Phi_incremental_; // 用于增量控制优化的 Phi 向量
+    Eigen::MatrixXd S_;        // S 矩阵，用于上一时刻控制输入的影响
+
+    Eigen::MatrixXd H_qp_delta_u_; // 用于增量控制优化的 Hessian 矩阵
+
+    Eigen::VectorXd u_last_;  // 上一时刻的控制输入
 
     /**
      * @brief 将连续时间状态空间模型离散化为离散时间模型。
@@ -134,6 +172,23 @@ private:
                                const Eigen::MatrixXd& ref_horizon,
                                Eigen::MatrixXd& H_qp,
                                Eigen::VectorXd& f_qp) const;
+
+    // 定义求解delta uk的H 和 f 矩阵，用于 QP 求解器。
+    /**
+     * @brief 构建增量控制优化的 QP 问题矩阵。
+     * 增量控制优化目标函数: J = sum_{i=0}^{Nc-1} (delta_u_i)^T R (delta_u_i)
+     * 转换为 QP 形式: min 0.5 * delta_U_horizon^T * H_delta_u * delta_U_horizon + f_delta_u^T * delta_U_horizon
+     * @param current_x 当前状态。
+     * @param ref_horizon 预测时域内的参考轨迹。
+     * @param u_last 上一时刻的控制输入。
+     * @param H_qp_delta_u QP 问题中的 H 矩阵引用 (将被赋值为 H_qp_delta_u_)。
+     * @param f_qp_delta_u QP 问题中的 f 向量引用。
+     */
+    void build_incremental_qp_matrices(const Eigen::VectorXd& current_x,
+                                       const Eigen::MatrixXd& ref_horizon,
+                                       const Eigen::VectorXd& u_last,
+                                       Eigen::MatrixXd& H_qp_delta_u,
+                                       Eigen::VectorXd& f_qp_delta_u) const;
 
     /**
      * @brief 使用 qpOASES 求解二次规划 (QP) 问题。

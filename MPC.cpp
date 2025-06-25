@@ -94,8 +94,9 @@ MPC::MPC(int N_p,
          const Eigen::MatrixXd& C,
          const Eigen::MatrixXd& Q,
          const Eigen::MatrixXd& R,
-         double dt)
-    : N_p_(N_p), N_c_(N_c), dt_(dt), C_(C), Q_(Q), R_(R) // 初始化 N_c_
+         double dt,
+         bool incremental) // 是否使用增量控制优化
+    : N_p_(N_p), N_c_(N_c), dt_(dt), C_(C), Q_(Q), R_(R), incremental_(incremental) // 初始化
 {
     nx_ = static_cast<int>(Ac.rows()); // rows 是行数
     nu_ = static_cast<int>(Bc.cols()); // cols 是列数
@@ -132,6 +133,15 @@ MPC::MPC(int N_p,
         std::cout << "  Precomputed G:\n" << G_ << "\n";   // Gamma 重命名为 G
         std::cout << "  Precomputed H_qp:\n" << H_qp_ << "\n";
 
+        // 如果启用了增量控制优化，打印相关矩阵
+        if (incremental_) {
+            std::cout << "  Incremental control enabled.\n";
+            std::cout << "  G_incremental_:\n" << G_incremental_ << "\n";
+            std::cout << "  S_:\n" << S_ << "\n"; // 打印 S 矩阵
+            std::cout << "  H_qp_delta_u_:\n" << H_qp_delta_u_ << "\n"; // 打印增量控制 Hessian 矩阵
+        } else {
+            std::cout << "  Incremental control disabled.\n";
+        }
 
     } catch (const std::exception& e) {
         std::cerr << "[MPC::MPC] 初始化错误: " << e.what() << std::endl;
@@ -238,19 +248,74 @@ void MPC::precompute_mpc_matrices() {
         R_bar_.block(i * nu_, i * nu_, nu_, nu_) = R_;
     }
 
-    // 构建 QP 问题的 Hessian 矩阵 H_qp
-    // H_qp = G_^T * Q_bar_ * G_ + R_bar_
-    H_qp_ = G_.transpose() * Q_bar_ * G_ + R_bar_; // H_qp = G^T * Q_bar * G + R_bar
-        // 注意：QP 目标函数是 0.5 * X^T * H * X + g^T * X。
-        // 而一些推导中的 J 包含 1/2，导致 H = 2 * (...)。
-        // qpOASES 使用 0.5 * x'Hx + g'x 的形式，因此 H_qp_ 不应包含因子 2。
+    G_incremental_ = Eigen::MatrixXd::Zero(N_p_ * ny_, N_c_ * nu_);
+    S_ = Eigen::MatrixXd::Zero(N_p_ * ny_, 1);
+    H_qp_ = Eigen::MatrixXd::Zero(N_c_ * nu_, N_c_ * nu_);
+    H_qp_delta_u_ = Eigen::MatrixXd::Zero(N_c_ * nu_, N_c_ * nu_);
 
-    // 验证 H_qp 的最终维度
-    if (H_qp_.rows() != N_c_ * nu_ || H_qp_.cols() != N_c_ * nu_) {
-        throw std::runtime_error("预计算的 H_qp 矩阵维度不正确。");
+    u_last_ = Eigen::VectorXd::Zero(nu_);
+
+    if(incremental_) {
+        // 增量控制优化
+        // 构建下三角矩阵 Id，下三角全为1
+        Eigen::MatrixXd Id = Eigen::MatrixXd::Identity(N_c_ * nu_, N_c_ * nu_);
+        for (int i = 0; i < N_c_ * nu_; ++i) {
+            for (int j = 0; j < N_c_ * nu_; ++j) {
+                if (i >= j) { // 下三角部分为1
+                    Id(i, j) = 1.0;
+                } else {
+                    Id(i, j) = 0.0; // 上三角部分为0
+                }
+            }
+        }
+        // 增量控制优化的 G 矩阵
+        G_incremental_ = G_ * Id; // 将 G 矩阵与下三角矩阵相乘
+
+        Eigen::MatrixXd I_list = Eigen::MatrixXd::Identity(N_c_ * nu_, 1);
+        // S 矩阵，表示上一时刻控制输入对预测输出的影响
+        S_ = G_ * I_list; // S 矩阵，表示上一时刻控制输入对预测输出的影响
+
+        // 构建 QP 问题的 Hessian 矩阵 H_qp_delta_u
+        // H_qp_delta_u = G_incremental_^T * Q_bar_ * G_incremental_ + R_bar_
+        H_qp_delta_u_ = G_incremental_.transpose() * Q_bar_ * G_incremental_ + R_bar_; // H_qp = G_incremental^T * Q_bar * G_incremental + R_bar
+
+        // 验证 H_qp 的最终维度
+        if (H_qp_delta_u_.rows() != N_c_ * nu_ || H_qp_delta_u_.cols() != N_c_ * nu_) {
+            throw std::runtime_error("预计算的 H_qp 矩阵维度不正确。");
+        }
+
+    } else {
+        // 构建 QP 问题的 Hessian 矩阵 H_qp
+        // H_qp = G_^T * Q_bar_ * G_ + R_bar_
+        H_qp_ = G_.transpose() * Q_bar_ * G_ + R_bar_; // H_qp = G^T * Q_bar * G + R_bar
+            // 注意：QP 目标函数是 0.5 * X^T * H * X + g^T * X。
+            // 而一些推导中的 J 包含 1/2，导致 H = 2 * (...)。
+            // qpOASES 使用 0.5 * x'Hx + g'x 的形式，因此 H_qp_ 不应包含因子 2。
+
+        // 验证 H_qp 的最终维度
+        if (H_qp_.rows() != N_c_ * nu_ || H_qp_.cols() != N_c_ * nu_) {
+            throw std::runtime_error("预计算的 H_qp 矩阵维度不正确。");
+        }
     }
 }
 
+/**
+     * @brief solve 方法，根据incremental_，求解 MPC 问题，预测并返回最优控制输入序列。
+     * @param ref_horizon 预测时域内的参考轨迹 (Np x ny)。
+     * @param current_x 当前状态向量 (nx x 1)。
+     * @param u_last 上一时刻的控制输入 (nu x 1)。如果为空，则使用内部存储的值。
+     * @return
+     */
+Eigen::MatrixXd MPC::solve(const Eigen::MatrixXd& ref_horizon,
+                      const Eigen::VectorXd& current_x,
+                      const Eigen::VectorXd& u_last)
+{
+    if (incremental_) {
+        return solve_incremental(ref_horizon, current_x, u_last);
+    } else {
+        return solve_direct(ref_horizon, current_x);
+    }
+}
 
 /**
  * @brief 求解 MPC 问题，预测并返回最优控制输入序列。
@@ -259,8 +324,8 @@ void MPC::precompute_mpc_matrices() {
  * @param ref_horizon 预测时域内的参考轨迹 (Np x ny)。
  * @return 最优控制输入序列 (Nc x nu)。在实际中通常只取第一个控制量。
  */
-Eigen::MatrixXd MPC::solve(const Eigen::VectorXd& current_x,
-                           const Eigen::MatrixXd& ref_horizon)
+Eigen::MatrixXd MPC::solve_direct(const Eigen::MatrixXd& ref_horizon,
+                           const Eigen::VectorXd& current_x)
 {
     try {
         // 严格的类型和维度检查
@@ -280,6 +345,7 @@ Eigen::MatrixXd MPC::solve(const Eigen::VectorXd& current_x,
         // 调用 QP 求解器
         Eigen::VectorXd u_horizon_optimized = solve_qp(H_qp, f_qp, N_c_ * nu_); // 传递控制时域的总输入变量数 N_c_ * nu_
 
+        // ####################################################################################################################################
         // 打印最终的成本
         Eigen::MatrixXd J = u_horizon_optimized.transpose() * H_qp * u_horizon_optimized / 2.0 + f_qp.transpose() * u_horizon_optimized;
         std::cout << "MPC Cost: " << J(0, 0) << std::endl;
@@ -289,11 +355,66 @@ Eigen::MatrixXd MPC::solve(const Eigen::VectorXd& current_x,
         for (int i = 0; i < N_c_; ++i) {
             optimal_U_sequence.row(i) = u_horizon_optimized.segment(i * nu_, nu_).transpose();
         }
+        // ####################################################################################################################################
 
         return optimal_U_sequence;
 
     } catch (const std::exception& e) {
         std::cerr << "[MPC::solve] 发生异常: " << e.what() << std::endl;
+        return Eigen::MatrixXd::Zero(N_c_, nu_); // 发生错误时返回零矩阵，保持正确维度 N_c_ x nu_
+    }
+}
+
+Eigen::MatrixXd MPC::solve_incremental(const Eigen::MatrixXd& ref_horizon,
+                                       const Eigen::VectorXd& current_x,
+                                       const Eigen::VectorXd& u_last)
+{
+    try {
+        // 严格的类型和维度检查
+        if (current_x.rows() != nx_ || current_x.cols() != 1) {
+            throw std::invalid_argument("MPC::solve: current_x must be an (nx x 1) column vector.");
+        }
+        // ref_horizon 是 N_p x ny
+        if (ref_horizon.rows() != N_p_ || ref_horizon.cols() != ny_) { // 检查预测时域 N_p_ 和输出维度 ny_
+            throw std::invalid_argument("MPC::solve: ref_horizon must be an (Np x ny) matrix.");
+        }
+
+        // 使用提供的 u_prev 或内部存储的值
+        Eigen::VectorXd u_last_to_use;
+        if (u_last.size() > 0) {
+            if (u_last.rows() != nu_ || u_last.cols() != 1) {
+                throw std::invalid_argument("MPC::solve: u_prev must be an (nu x 1) column vector.");
+            }
+            u_last_to_use = u_last;
+        } else {
+            u_last_to_use =  Eigen::VectorXd::Zero(nu_);
+        }
+
+        Eigen::MatrixXd H_qp_delta_u;
+        Eigen::VectorXd f_qp_delta_u;
+        // 构建 QP 问题的 H 和 f 矩阵
+        build_incremental_qp_matrices(current_x, ref_horizon, u_last_to_use, H_qp_delta_u, f_qp_delta_u);
+
+        // 调用 QP 求解器
+        Eigen::VectorXd delta_u_optimized = solve_qp(H_qp_delta_u, f_qp_delta_u, N_c_ * nu_); // 传递控制时域的总输入变量数 N_c_ * nu_
+
+        // ####################################################################################################################################
+        // 打印最终的成本
+        Eigen::MatrixXd J = delta_u_optimized.transpose() * H_qp_delta_u * delta_u_optimized / 2.0 + f_qp_delta_u.transpose() * delta_u_optimized;
+        std::cout << "MPC Cost: " << J(0, 0) << std::endl;
+
+        // 将优化后的控制输入向量重塑为 (N_c x nu) 矩阵
+        Eigen::MatrixXd optimal_U_sequence(N_c_, nu_);
+        for (int i = 0; i < N_c_; ++i) {
+            optimal_U_sequence.row(i) = delta_u_optimized.segment(i * nu_, nu_).transpose();
+        }
+        // ####################################################################################################################################
+
+        return optimal_U_sequence;
+
+
+    } catch (const std::exception& e) {
+        std::cerr << "[MPC::solve_incremental] 发生异常: " << e.what() << std::endl;
         return Eigen::MatrixXd::Zero(N_c_, nu_); // 发生错误时返回零矩阵，保持正确维度 N_c_ x nu_
     }
 }
@@ -329,6 +450,37 @@ void MPC::build_mpc_qp_matrices(const Eigen::VectorXd& current_x,
 
 
 /**
+     * @brief 构建增量控制优化的 QP 问题矩阵。
+     * 增量控制优化目标函数: J = sum_{i=0}^{Nc-1} (delta_u_i)^T R (delta_u_i)
+     * 转换为 QP 形式: min 0.5 * delta_U_horizon^T * H_delta_u * delta_U_horizon + f_delta_u^T * delta_U_horizon
+     * @param current_x 当前状态。
+     * @param ref_horizon 预测时域内的参考轨迹。
+     * @param u_last 上一时刻的控制输入。
+     * @param H_qp_delta_u QP 问题中的 H 矩阵引用 (将被赋值为 H_qp_delta_u_)。
+     * @param f_qp_delta_u QP 问题中的 f 向量引用。
+     */
+void MPC::build_incremental_qp_matrices(const Eigen::VectorXd& current_x,
+                                   const Eigen::MatrixXd& ref_horizon,
+                                   const Eigen::VectorXd& u_last,
+                                   Eigen::MatrixXd& H_qp_delta_u,
+                                   Eigen::VectorXd& f_qp_delta_u) const
+{
+    // H_qp_delta_u 已经预计算好，直接赋值
+    H_qp_delta_u = H_qp_delta_u_;
+
+    // 将 ref_horizon (Np x ny) 展开成一个长向量 (Np*ny x 1)
+    Eigen::VectorXd R_vec = Eigen::VectorXd::Zero(N_p_ * ny_);
+    for (int i = 0; i < N_p_; ++i) {
+        R_vec.segment(i * ny_, ny_) = ref_horizon.row(i).transpose();
+    }
+
+    // 构建增量控制优化的 f 向量
+    Eigen::VectorXd error_free = Phi_ * current_x + S_ * u_last - R_vec;
+    f_qp_delta_u = G_incremental_.transpose() * Q_bar_ * error_free;
+
+}
+
+/**
  * @brief 使用 qpOASES 求解二次规划 (QP) 问题。
  * 此函数集成了 qpOASES 库以找到最优控制序列。
  * @param H_qp QP 问题中的 H 矩阵。
@@ -342,7 +494,8 @@ Eigen::VectorXd MPC::solve_qp(const Eigen::MatrixXd& H_qp,
 {
     std::cout << "  Calling qpOASES QP solver...\n";
 
-    Eigen::VectorXd u_horizon_optimized = Eigen::VectorXd::Zero(nu_horizon);
+    // 定义求解结果
+    Eigen::VectorXd result_optimized(nu_horizon);
 
     // qpOASES 需要 C-style 数组 (原始数据指针)
     // Eigen 默认是列主序，qpOASES 的 H 需要是列主序的数组
@@ -371,11 +524,11 @@ Eigen::VectorXd MPC::solve_qp(const Eigen::MatrixXd& H_qp,
     }
 
     // 获取原始解 (最优控制序列)
-    qpOASES::real_t* sol_data = u_horizon_optimized.data();
+    qpOASES::real_t* sol_data = result_optimized.data();
     qp_solver.getPrimalSolution(sol_data);
 
     std::cout << "  qpOASES QP solver finished.\n";
-    return u_horizon_optimized;
+    return result_optimized;
 }
 
 /**
@@ -449,7 +602,8 @@ std::pair<Eigen::MatrixXd, double> MPC::simulate_prediction(
  * @return 预测输出序列 (Np*ny x 1)。
  */
 Eigen::VectorXd MPC::predict_y_horizon(const Eigen::VectorXd& x_current,
-                                       const Eigen::VectorXd& u_horizon) const
+                                       const Eigen::VectorXd& u_horizon,
+                                       const Eigen::VectorXd& u_last) const
 {
     // 检查维度
     if (x_current.rows() != nx_ || x_current.cols() != 1) {
@@ -459,6 +613,23 @@ Eigen::VectorXd MPC::predict_y_horizon(const Eigen::VectorXd& x_current,
     if (u_horizon.rows() != N_c_ * nu_ || u_horizon.cols() != 1) { // 检查 N_c_
         throw std::invalid_argument("predict_y_horizon: u_horizon 必须是 (Nc*nu x 1) 列向量。");
     }
-    // 计算 y_horizon = Phi_ * x_current + G_ * u_horizon
-    return Phi_ * x_current + G_ * u_horizon;// 结果维度为 (Np*ny x 1)
+
+    if(incremental_) {
+        // 使用提供的 u_prev 或内部存储的值
+        Eigen::VectorXd u_last_to_use;
+        if (u_last.size() > 0) {
+            if (u_last.rows() != nu_ || u_last.cols() != 1) {
+                throw std::invalid_argument("MPC::solve: u_prev must be an (nu x 1) column vector.");
+            }
+            u_last_to_use = u_last;
+        } else {
+            u_last_to_use =  Eigen::VectorXd::Zero(nu_);
+        }
+        // 如果启用了增量控制优化，使用 G_incremental_ 和 S_ 计算预测输出
+        return Phi_ * x_current + S_ * u_last_to_use + G_incremental_ * u_horizon;
+    }else{
+        // 计算 y_horizon = Phi_ * x_current + G_ * u_horizon
+        return Phi_ * x_current + G_ * u_horizon;// 结果维度为 (Np*ny x 1)
+    }
+
 }

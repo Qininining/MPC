@@ -59,31 +59,31 @@ MainWindow::MainWindow(QWidget *parent)
     ui->charts_3->setRenderHint(QPainter::Antialiasing); // 抗锯齿
 
 
-    // Eigen::MatrixXd Ac(2, 2);
-    // Ac << 0.00, 1,
-    //       -50, -5;
-    // Eigen::MatrixXd Bc(2, 1);
-    // Bc << 0,
-    //       5;
-    // Eigen::MatrixXd C(1, 2);
-    // C << 1, 0;
+    Eigen::MatrixXd Ac(2, 2);
+    Ac << 0.00, 1,
+          -50, -5;
+    Eigen::MatrixXd Bc(2, 1);
+    Bc << 0,
+          5;
+    Eigen::MatrixXd C(1, 2);
+    C << 1, 0;
 
-    Eigen::MatrixXd Ac(1, 1);
-    Ac << 0;
-    Eigen::MatrixXd Bc(1, 1);
-    Bc << 1;
-    Eigen::MatrixXd C(1, 1);
-    C << 1;
+    // Eigen::MatrixXd Ac(1, 1);
+    // Ac << 0;
+    // Eigen::MatrixXd Bc(1, 1);
+    // Bc << 1;
+    // Eigen::MatrixXd C(1, 1);
+    // C << 1;
 
     Eigen::MatrixXd Q(1, 1);
     Q << 100; // 输出误差权重矩阵
     Eigen::MatrixXd R(1, 1);
     R << 0.01; // 控制输入权重矩阵
     double dt = 0.01; // 采样时间
-    int Np = 5; // 预测时域长度
-    int Nc = 5; // 控制时域长度
+    int Np = 80; // 预测时域长度
+    int Nc = 40; // 控制时域长度
 
-    mpcController = new MPC(Np, Nc, Ac, Bc, C, Q, R, dt); // dt
+    mpcController = new MPC(Np, Nc, Ac, Bc, C, Q, R, dt, false); // dt
 
     int nx = static_cast<int>(Ac.rows()); // rows 是行数
     // int nu = static_cast<int>(Bc.cols()); // cols 是列数
@@ -138,7 +138,8 @@ MainWindow::MainWindow(QWidget *parent)
 
 
 
-    Eigen::MatrixXd result = mpcController->solve(current_x, ref_horizon);
+    Eigen::MatrixXd result = mpcController->solve(ref_horizon, current_x);
+    // Eigen::MatrixXd result = mpcController->solve_incremental(ref_horizon, current_x);
 
     Eigen::VectorXd u_predict = result.reshaped().eval();
     // std::cout << "u_predict :\n" << u_predict << std::endl;
