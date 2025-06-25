@@ -306,7 +306,7 @@ void MPC::precompute_mpc_matrices() {
      * @param u_last 上一时刻的控制输入 (nu x 1)。如果为空，则使用内部存储的值。
      * @return
      */
-Eigen::MatrixXd MPC::solve(const Eigen::MatrixXd& ref_horizon,
+Eigen::VectorXd MPC::solve(const Eigen::MatrixXd& ref_horizon,
                       const Eigen::VectorXd& current_x,
                       const Eigen::VectorXd& u_last)
 {
@@ -324,7 +324,7 @@ Eigen::MatrixXd MPC::solve(const Eigen::MatrixXd& ref_horizon,
  * @param ref_horizon 预测时域内的参考轨迹 (Np x ny)。
  * @return 最优控制输入序列 (Nc x nu)。在实际中通常只取第一个控制量。
  */
-Eigen::MatrixXd MPC::solve_direct(const Eigen::MatrixXd& ref_horizon,
+Eigen::VectorXd MPC::solve_direct(const Eigen::MatrixXd& ref_horizon,
                            const Eigen::VectorXd& current_x)
 {
     try {
@@ -350,14 +350,18 @@ Eigen::MatrixXd MPC::solve_direct(const Eigen::MatrixXd& ref_horizon,
         Eigen::MatrixXd J = u_horizon_optimized.transpose() * H_qp * u_horizon_optimized / 2.0 + f_qp.transpose() * u_horizon_optimized;
         std::cout << "MPC Cost: " << J(0, 0) << std::endl;
 
-        // 将优化后的控制输入向量重塑为 (N_c x nu) 矩阵
-        Eigen::MatrixXd optimal_U_sequence(N_c_, nu_);
-        for (int i = 0; i < N_c_; ++i) {
-            optimal_U_sequence.row(i) = u_horizon_optimized.segment(i * nu_, nu_).transpose();
-        }
+        // // 将优化后的控制输入向量重塑为 (N_c x nu) 矩阵
+        // Eigen::MatrixXd optimal_U_sequence(N_c_, nu_);
+        // for (int i = 0; i < N_c_; ++i) {
+        //     optimal_U_sequence.row(i) = u_horizon_optimized.segment(i * nu_, nu_).transpose();
+        // }
         // ####################################################################################################################################
 
-        return optimal_U_sequence;
+        // 更新内部存储的上一时刻控制输入（使用第一个优化控制）
+        // u_last_ = u_horizon_optimized.row(0).transpose();
+        u_last_ = u_horizon_optimized.head(nu_); // 只取第一个控制输入，更新内部存储的上一时刻控制输入
+
+        return u_horizon_optimized;
 
     } catch (const std::exception& e) {
         std::cerr << "[MPC::solve] 发生异常: " << e.what() << std::endl;
@@ -365,7 +369,7 @@ Eigen::MatrixXd MPC::solve_direct(const Eigen::MatrixXd& ref_horizon,
     }
 }
 
-Eigen::MatrixXd MPC::solve_incremental(const Eigen::MatrixXd& ref_horizon,
+Eigen::VectorXd MPC::solve_incremental(const Eigen::MatrixXd& ref_horizon,
                                        const Eigen::VectorXd& current_x,
                                        const Eigen::VectorXd& u_last)
 {
@@ -403,14 +407,14 @@ Eigen::MatrixXd MPC::solve_incremental(const Eigen::MatrixXd& ref_horizon,
         Eigen::MatrixXd J = delta_u_optimized.transpose() * H_qp_delta_u * delta_u_optimized / 2.0 + f_qp_delta_u.transpose() * delta_u_optimized;
         std::cout << "MPC Cost: " << J(0, 0) << std::endl;
 
-        // 将优化后的控制输入向量重塑为 (N_c x nu) 矩阵
-        Eigen::MatrixXd optimal_U_sequence(N_c_, nu_);
-        for (int i = 0; i < N_c_; ++i) {
-            optimal_U_sequence.row(i) = delta_u_optimized.segment(i * nu_, nu_).transpose();
-        }
+        // // 将优化后的控制输入向量重塑为 (N_c x nu) 矩阵
+        // Eigen::MatrixXd optimal_U_sequence(N_c_, nu_);
+        // for (int i = 0; i < N_c_; ++i) {
+        //     optimal_U_sequence.row(i) = delta_u_optimized.segment(i * nu_, nu_).transpose();
+        // }
         // ####################################################################################################################################
 
-        return optimal_U_sequence;
+        return delta_u_optimized;
 
 
     } catch (const std::exception& e) {

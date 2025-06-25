@@ -80,10 +80,11 @@ MainWindow::MainWindow(QWidget *parent)
     Eigen::MatrixXd R(1, 1);
     R << 0.01; // 控制输入权重矩阵
     double dt = 0.01; // 采样时间
-    int Np = 80; // 预测时域长度
-    int Nc = 40; // 控制时域长度
+    int Np = 2; // 预测时域长度
+    int Nc = 2; // 控制时域长度
 
-    mpcController = new MPC(Np, Nc, Ac, Bc, C, Q, R, dt, false); // dt
+    mpcController = new MPC(Np, Nc, Ac, Bc, C, Q, R, dt, true);
+    // mpcController = new MPC(Np, Nc, Ac, Bc, C, Q, R, dt, false);
 
     int nx = static_cast<int>(Ac.rows()); // rows 是行数
     // int nu = static_cast<int>(Bc.cols()); // cols 是列数
@@ -138,18 +139,18 @@ MainWindow::MainWindow(QWidget *parent)
 
 
 
-    Eigen::MatrixXd result = mpcController->solve(ref_horizon, current_x);
+    Eigen::VectorXd u_predict = mpcController->solve(ref_horizon, current_x);
     // Eigen::MatrixXd result = mpcController->solve_incremental(ref_horizon, current_x);
 
-    Eigen::VectorXd u_predict = result.reshaped().eval();
-    // std::cout << "u_predict :\n" << u_predict << std::endl;
+    // Eigen::VectorXd u_predict = result.reshaped().eval();
+    std::cout << "u_predict :\n" << u_predict << std::endl;
 
     Eigen::VectorXd y_predict = mpcController->predict_y_horizon(current_x, u_predict);
-    // std::cout << "y_predict:\n" << y_predict << std::endl;
+    std::cout << "y_predict:\n" << y_predict << std::endl;
 
     Eigen::VectorXd ref_ = ref_horizon.reshaped().eval();
     Eigen::VectorXd error = ref_ - y_predict;
-    // std::cout << "error:\n" << error << std::endl;
+    std::cout << "error:\n" << error << std::endl;
 
 
 

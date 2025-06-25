@@ -48,7 +48,7 @@ public:
      * @param u_last 上一时刻的控制输入 (nu x 1)。如果为空，则使用内部存储的值。
      * @return
      */
-    Eigen::MatrixXd solve(const Eigen::MatrixXd& ref_horizon,
+    Eigen::VectorXd solve(const Eigen::MatrixXd& ref_horizon,
                           const Eigen::VectorXd& current_x,
                           const Eigen::VectorXd& u_last = Eigen::VectorXd());
     /**
@@ -58,7 +58,7 @@ public:
      * @param ref_horizon 预测时域内的参考轨迹 (Np x ny)。
      * @return 最优控制输入序列 (Nc x nu)。在实际中通常只取第一个控制量。
      */
-    Eigen::MatrixXd solve_direct(const Eigen::MatrixXd& ref_horizon,
+    Eigen::VectorXd solve_direct(const Eigen::MatrixXd& ref_horizon,
                           const Eigen::VectorXd& current_x);
 
     //
@@ -69,7 +69,7 @@ public:
      * @param u_last 上一时刻的控制输入 (nu x 1)。如果为空，则使用内部存储的值。
      * @return 最优增量控制输入序列 (Nc x nu)。在实际中通常只取第一个增量控制量。
      */
-    Eigen::MatrixXd solve_incremental(const Eigen::MatrixXd& ref_horizon,
+    Eigen::VectorXd solve_incremental(const Eigen::MatrixXd& ref_horizon,
                                       const Eigen::VectorXd& current_x,
                                       const Eigen::VectorXd& u_last = Eigen::VectorXd());
 
@@ -101,6 +101,17 @@ public:
     Eigen::VectorXd predict_y_horizon(const Eigen::VectorXd& x_current,
                                       const Eigen::VectorXd& u_horizon,
                                       const Eigen::VectorXd& u_last = Eigen::VectorXd()) const;
+
+    // /**
+    //  * @brief 设置上一时刻的控制输入，用于增量控制优化。
+    //  * @param u_last 上一时刻的控制输入 (nu x 1)。
+    //  */
+    // void setLastControlInput(const Eigen::VectorXd& u_last);
+    /**
+     * @brief 获取上一时刻的控制输入。
+     * @return 上一时刻的控制输入 (nu x 1)。
+     */
+    const Eigen::VectorXd& getLastControlInput() const { return u_last_; }
 
 
 
